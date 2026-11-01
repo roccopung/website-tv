@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Interlace</title>
+<style>
+  body { margin: 0; background: #000; color: #fff; font: 13px system-ui; }
+  .stage { --line: 6px; position: relative; width: 100vw; height: 100vh; }
+  video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #b { mask-image: repeating-linear-gradient(#000 0 var(--line), transparent var(--line) calc(var(--line) * 2)); }
+  .odd #b { mask-position: 0 var(--line); }
+  .controls { position: fixed; bottom: 16px; left: 16px; display: flex; gap: 16px; padding: 8px 12px; background: #0008; border-radius: 6px; }
+</style>
+
+<div class="stage">
+  <video id="a" autoplay muted loop playsinline></video>
+  <video id="b" autoplay muted loop playsinline></video>
+</div>
+
+<div class="controls">
+  <select id="pickA"></select>
+  <select id="pickB"></select>
+  <label>Line <input id="line" type="range" min="1" max="20" value="2"></label>
+  <select id="rate">
+    <option value="60">NTSC 60 fields/s</option>
+    <option value="50">PAL 50 fields/s</option>
+    <option value="5">Slow 5 fields/s</option>
+  </select>
+</div>
+
+<script>
+  const files = [
+    'storm',
+    // 'PrivateL1947.mp4', 'Sleepfor1950.mp4', 'SocialSe1953.mp4', 'SpotNews1937.mp4',
+    // 'Survival1951.mp4', 'Usingthe1947.mp4', 'WartimeN1943.mp4', 'stripper_1.mp4',
+    // 'stripper_betty_rowland.mp4', 'stripper_variety_girls.mp4', 'tmp_50168.mp4',
+  ];
+  const stage = document.querySelector('.stage');
+
+  for (const [pick, video, start] of [[pickA, a, 0], [pickB, b, 1]]) {
+    pick.innerHTML = files.map(f => `<option>${f}</option>`).join('');
+    pick.selectedIndex = start;
+    pick.onchange = () => video.src = 'files/' + pick.value;
+    pick.onchange();
+  }
+
+  line.oninput = () => stage.style.setProperty('--line', line.value + 'px');
+
+  (function tick(t = 0) {
+    stage.classList.toggle('odd', Math.floor(t * rate.value / 1000) % 2 === 1);
+    requestAnimationFrame(tick);
+  })();
+</script>
