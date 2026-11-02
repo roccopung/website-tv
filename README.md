@@ -23,4 +23,7 @@ Videos are loaded from `files/` (see `FILES` in `tv.html`).
 - **Click on screen**: freeze the current field briefly
 - **Dropdown** (bottom left): pick a video
 - **Slider** (bottom): move through the current video
+- **M**: mute / unmute (WebGL version)
+- **← / →**: jump 5 s back / forward (WebGL version)
+- **Enter**: play / pause (WebGL version)
 - **Low res** checkbox: toggle the forced CRT resolution vs native screen resolution
