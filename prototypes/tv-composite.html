@@ -1,6 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Old TV (WebGL)</title>
+<title>Old TV (Composite)</title>
 <style>
   body { margin: 0; background: #000; }
   video, canvas { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; }
@@ -20,10 +20,18 @@
   import { TRANSITIONS } from './transitions.js';
 
   // --- picture ---
-  const LINE_CSS_PX = 3.5;         // scanline spacing in CSS px; lower = more, finer lines
-  const H_SAMPLES = 480;         // horizontal resolution across a 4:3 width; lower = blurrier
-  const LUMA_SOFTNESS = 0.5;     // horizontal blur of brightness, in samples; higher = softer text edges
-  const CHROMA_RATIO = 1.3 / 4.2; // color sharpness vs brightness (NTSC bandwidths); lower = more color bleed (below ~0.25 add shader taps)
+  const LINE_CSS_PX = 3;         // scanline spacing in CSS px; lower = more, finer lines
+  const SAMPLE_MHZ = 315 / 88 * 4; // composite sampling rate: 4 samples per color subcarrier cycle
+  const H_SAMPLES = 753;         // samples across a 4:3 width: SAMPLE_MHZ x 52.6 µs of visible line
+  const LUMA_MHZ = 4.2;          // transmitted brightness bandwidth; lower = blurrier
+  const CHROMA_I_MHZ = 1.3;      // transmitted orange/blue bandwidth; lower = more color bleed
+  const CHROMA_Q_MHZ = 0.6;      // transmitted purple/green bandwidth; lower = more color bleed, more shader taps
+  const DECODER_MHZ = 1.3;       // receiver color bandwidth; lower = more color bleed
+  const COLOR = 1;               // TV color knob; 1 = source saturation
+  const COMPOSITE_SHARPENING = 0.3; // boosts high frequencies of the composite signal: sharper edges, stronger color (gain = 1 + 0.665 x this)
+  const SHARPENING_SAMPLES = 0.94; // sharpening blur width; 0.94 matches the color gain of ntsc-rs
+  const SEPARATION = 'notch';    // brightness/color split: 'notch' = dot crawl and rainbows on fine detail; 'comb1' or 'comb2' = sharper, artifacts only on vertical color changes
+  const NOTCH_SAMPLES = 3;       // notch filter length; lower = softer brightness, stronger dot crawl
 
   // --- electron beam ---
   const BEAM_MIN = [0.18, 0.18, 0.18]; // [R, G, B] beam thickness on dark lines, in line heights; lower = darker gaps
@@ -45,7 +53,7 @@
   const BLOOM_SPREAD = 1.5;      // glow size; +1 doubles the radius
 
   // --- halation (light scattered inside the glass: wide, faint, no threshold) ---
-  const HALATION_STRENGTH = 0.1;        // share of light spread into the halo; 0 = off
+  const HALATION_STRENGTH = 0.02;        // share of light spread into the halo; 0 = off
   const HALATION_SPREAD = 3.5;             // halo size; +1 doubles the radius
   const HALATION_TINT = [1, 0.85, 0.7];  // [R, G, B] halo color; warm by default
 
@@ -65,6 +73,10 @@
   const f = n => n.toFixed(6);
   const v3 = a => `vec3(${a.map(f)})`;
 
+  const sigma = mhz => 0.1325 * SAMPLE_MHZ / mhz;
+  const TAPS = Math.ceil(6 * sigma(CHROMA_Q_MHZ));
+  const WEIGHT = x => f(1 / (2 * x * x));
+
   const FILES = [
     'storm.mp4', 'perfect-days.mp4', 'rafman-test.mp4'
   ];
@@ -72,35 +84,107 @@
   const VS = `#version 300 es
   void main() { gl_Position = vec4(vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4. - 1., 0, 1); }`;
 
-  const FIELD_FS = `#version 300 es
+  const CARRIER = `
+  const float IM[4] = float[4](1., 0., -1., 0.);
+  const float QM[4] = float[4](0., 1., 0., -1.);
+  int phase(ivec2 p) { return (p.x + 2 * ((p.y + FRAME) & 1)) & 3; }`;
+
+  const ENCODE_FS = `#version 300 es
   precision highp float;
   uniform sampler2D V0, V1, M;
   uniform vec2 C0, C1, S;
   uniform vec4 B;
   uniform float MIX;
-  uniform int FIELD;
+  uniform int FRAME;
   out vec4 o;
-  const float LUMA_S = ${f(LUMA_SOFTNESS)}, CHROMA = ${f(CHROMA_RATIO)}, INTERLACE = ${f(INTERLACE)};
   const mat3 TO_YIQ = mat3(.299, .596, .211, .587, -.274, -.523, .114, -.322, .312);
-  const mat3 TO_RGB = mat3(1, 1, 1, .956, -.272, -1.106, .621, -.647, 1.703);
+  const vec3 W = vec3(${WEIGHT(sigma(LUMA_MHZ))}, ${WEIGHT(sigma(CHROMA_I_MHZ))}, ${WEIGHT(sigma(CHROMA_Q_MHZ))});
+  ${CARRIER}
   vec3 src(vec2 uv) {
     vec3 a = texture(V0, .5 + (uv - .5) * C0).rgb;
     vec3 b = texture(V1, .5 + (uv - .5) * C1).rgb;
     return mix(a, b, MIX * texture(M, B.xy + uv * B.zw).a);
   }
   void main() {
-    float a = (int(gl_FragCoord.y) & 1) == FIELD ? 1. : 1. - INTERLACE;
-    if (a == 0.) discard;
     vec2 uv = vec2(gl_FragCoord.x / S.x, 1. - gl_FragCoord.y / S.y);
-    vec3 acc = vec3(0);
-    vec2 sum = vec2(0);
-    for (int k = -8; k <= 8; k++) {
+    vec3 acc = vec3(0), sum = vec3(0);
+    for (int k = -${TAPS}; k <= ${TAPS}; k++) {
       float d = float(k) * .5;
-      vec2 wt = exp(-d * d / vec2(2. * LUMA_S * LUMA_S, 2. * LUMA_S * LUMA_S / (CHROMA * CHROMA)));
-      acc += TO_YIQ * src(uv + vec2(d / S.x, 0)) * wt.xyy;
+      vec3 wt = exp(-d * d * W);
+      acc += TO_YIQ * src(uv + vec2(d / S.x, 0)) * wt;
       sum += wt;
     }
-    o = vec4(TO_RGB * (acc / sum.xyy), a);
+    vec3 yiq = acc / sum;
+    int n = phase(ivec2(gl_FragCoord.xy));
+    o = vec4(yiq.x + yiq.y * IM[n] + yiq.z * QM[n], 0, 0, 1);
+  }`;
+
+  const SHARPEN_FS = `#version 300 es
+  precision highp float;
+  uniform sampler2D C;
+  out vec4 o;
+  void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    int last = textureSize(C, 0).x - 1;
+    float soft = 0., sum = 0.;
+    for (int k = -3; k <= 3; k++) {
+      float w = exp(-float(k * k) * ${WEIGHT(SHARPENING_SAMPLES)});
+      soft += texelFetch(C, ivec2(clamp(p.x + k, 0, last), p.y), 0).r * w;
+      sum += w;
+    }
+    float s = texelFetch(C, p, 0).r;
+    o = vec4(s + ${f(COMPOSITE_SHARPENING)} * (s - soft / sum), 0, 0, 1);
+  }`;
+
+  const SEPARATE_FS = `#version 300 es
+  precision highp float;
+  uniform sampler2D C;
+  out vec4 o;
+  const float IM[4] = float[4](1., 0., -1., 0.);
+  const int MODE = ${['notch', 'comb1', 'comb2'].indexOf(SEPARATION)};
+  void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy), size = textureSize(C, 0);
+    float s = texelFetch(C, p, 0).r, chroma = 0.;
+    float up = texelFetch(C, ivec2(p.x, p.y == 0 ? 1 : p.y - 1), 0).r;
+    float down = texelFetch(C, ivec2(p.x, p.y == size.y - 1 ? p.y - 1 : p.y + 1), 0).r;
+    if (MODE == 1) chroma = .5 * (s - up);
+    else if (MODE == 2) chroma = .5 * s - .25 * (up + down);
+    else {
+      float sum = 0.;
+      for (int k = -${3 * NOTCH_SAMPLES}; k <= ${3 * NOTCH_SAMPLES}; k++) {
+        float w = exp(-float(k * k) * ${WEIGHT(NOTCH_SAMPLES)});
+        chroma += 2. * w * IM[k & 3] * texelFetch(C, ivec2(clamp(p.x + k, 0, size.x - 1), p.y), 0).r;
+        sum += w;
+      }
+      chroma /= sum;
+    }
+    o = vec4(s - chroma, chroma, 0, 1);
+  }`;
+
+  const DECODE_FS = `#version 300 es
+  precision highp float;
+  uniform sampler2D YC;
+  uniform int FRAME, FIELD;
+  out vec4 o;
+  const float INTERLACE = ${f(INTERLACE)}, GIN = ${f(SIGNAL_GAMMA)}, COLOR = ${f(COLOR)};
+  const mat3 TO_RGB = mat3(1, 1, 1, .956, -.272, -1.106, .621, -.647, 1.703);
+  ${CARRIER}
+  void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    float a = (p.y & 1) == FIELD ? 1. : 1. - INTERLACE;
+    if (a == 0.) discard;
+    int last = textureSize(YC, 0).x - 1;
+    vec2 iq = vec2(0);
+    float sum = 0.;
+    for (int k = -6; k <= 6; k++) {
+      ivec2 t = ivec2(p.x + k, p.y);
+      int n = phase(t);
+      float w = exp(-float(k * k) * ${WEIGHT(sigma(DECODER_MHZ))});
+      iq += 2. * w * texelFetch(YC, ivec2(clamp(t.x, 0, last), p.y), 0).g * vec2(IM[n], QM[n]);
+      sum += w;
+    }
+    vec3 yiq = vec3(texelFetch(YC, p, 0).r, COLOR * iq / sum);
+    o = vec4(pow(max(TO_RGB * yiq, vec3(0)), vec3(GIN)), a);
   }`;
 
   const BEAM_FS = `#version 300 es
@@ -123,8 +207,7 @@
       float i = floor(y) + k;
       if (i < 0. || i >= N) continue;
       float ty = (i + .5) / N;
-      vec3 v = vec3(textureLod(L, vec2(uv.x + dx, ty), 0.).r, textureLod(L, vec2(uv.x, ty), 0.).g, textureLod(L, vec2(uv.x - dx, ty), 0.).b);
-      vec3 lin = pow(v, vec3(GIN));
+      vec3 lin = vec3(textureLod(L, vec2(uv.x + dx, ty), 0.).r, textureLod(L, vec2(uv.x, ty), 0.).g, textureLod(L, vec2(uv.x - dx, ty), 0.).b);
       vec3 s = mix(SMIN, SMAX, lin);
       s = sqrt(s * s + 1. / (12. * P * P));
       float d = y - i - .5;
@@ -132,8 +215,8 @@
     }
     vec3 m = .5 + .5 * cos(6.2832 * (gl_FragCoord.x / T - vec3(0, 1, 2) / 3.));
     c *= mix(vec3(1), m, MASK_K) / (1. - .5 * MASK_K);
-    c = mix(c, HAL_TINT * pow(textureLod(L, uv, HAL_LOD).rgb, vec3(GIN)), HAL_K);
-    vec3 g = textureLod(L, uv, BLOOM_LOD).rgb;
+    c = mix(c, HAL_TINT * textureLod(L, uv, HAL_LOD).rgb, HAL_K);
+    vec3 g = pow(textureLod(L, uv, BLOOM_LOD).rgb, vec3(1. / GIN));
     o = vec4(pow(c, vec3(1. / GOUT)) + BLOOM_K * clamp((g - BLOOM_T) / (1. - 2. * BLOOM_T), 0., 1.), 1);
   }`;
 
@@ -158,10 +241,15 @@
     return p;
   };
   const uniforms = (p, ...names) => Object.fromEntries(names.map(n => [n, gl.getUniformLocation(p, n)]));
-  const A = program(FIELD_FS), Bp = program(BEAM_FS);
-  const ua = uniforms(A, 'V0', 'V1', 'M', 'C0', 'C1', 'S', 'B', 'MIX', 'FIELD');
+  if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('Composite signal needs EXT_color_buffer_float');
+  const A = program(ENCODE_FS), Sh = program(SHARPEN_FS), Se = program(SEPARATE_FS), De = program(DECODE_FS), Bp = program(BEAM_FS);
+  const ua = uniforms(A, 'V0', 'V1', 'M', 'C0', 'C1', 'S', 'B', 'MIX', 'FRAME');
+  const ud = uniforms(De, 'YC', 'FRAME', 'FIELD');
   const ub = uniforms(Bp, 'L', 'R', 'N', 'P', 'T', 'D');
   gl.useProgram(A); gl.uniform1i(ua.M, 2);
+  gl.useProgram(Sh); gl.uniform1i(gl.getUniformLocation(Sh, 'C'), 4);
+  gl.useProgram(Se); gl.uniform1i(gl.getUniformLocation(Se, 'C'), 5);
+  gl.useProgram(De); gl.uniform1i(ud.YC, 6);
   gl.useProgram(Bp); gl.uniform1i(ub.L, 3);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
@@ -176,6 +264,19 @@
   const fb = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, gl.getParameter(gl.TEXTURE_BINDING_2D), 0);
+
+  const SIGNALS = [[4, 'R16F', 'RED'], [5, 'R16F', 'RED'], [6, 'RG16F', 'RG']];
+  const [fbComposite, fbSharpened, fbSeparated] = SIGNALS.map(([unit]) => {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    const target = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    return target;
+  });
 
   const upload = (unit, src) => {
     gl.activeTexture(gl.TEXTURE0 + unit);
@@ -193,7 +294,11 @@
     mask.width = Math.ceil(innerWidth * MASK_SCALE) + 2 * MASK_PAD;
     mask.height = Math.ceil(cssH * MASK_SCALE) + 2 * MASK_PAD;
     gl.activeTexture(gl.TEXTURE3);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    for (const [unit, internal, format] of SIGNALS) {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl[internal], w, h, 0, gl[format], gl.HALF_FLOAT, null);
+    }
     gl.useProgram(A);
     gl.uniform2f(ua.S, w, h);
     gl.uniform4f(ua.B, MASK_PAD / mask.width, MASK_PAD / mask.height, 1 - 2 * MASK_PAD / mask.width, 1 - 2 * MASK_PAD / mask.height);
@@ -210,7 +315,7 @@
   // playback
 
   let cur = 0, idx = 0;
-  const load = (v, i) => { v.src = 'files/' + FILES[i]; v.play(); };
+  const load = (v, i) => { v.src = '../static/files/' + FILES[i]; v.play(); };
 
   pick.innerHTML = FILES.map(f => `<option>${f}</option>`).join('');
   pick.onchange = () => load(vids[cur], idx = pick.selectedIndex);
@@ -299,9 +404,21 @@
       crossfadeAudio(p);
     }
     gl.uniform1f(ua.MIX, on ? 1 : 0);
-    gl.uniform1i(ua.FIELD, field & 1);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    const frame = field >> 1;
+    gl.uniform1i(ua.FRAME, frame);
     gl.viewport(0, 0, w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbComposite);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.useProgram(Sh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbSharpened);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.useProgram(Se);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbSeparated);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.useProgram(De);
+    gl.uniform1i(ud.FRAME, frame);
+    gl.uniform1i(ud.FIELD, field & 1);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     gl.enable(gl.BLEND);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.disable(gl.BLEND);

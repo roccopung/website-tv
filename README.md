@@ -1,29 +1,24 @@
 # website-tv
 
-## Run
-
-`tv.html` loads `transitions.js` as an ES module, so it must be served over HTTP. Opening it with `file://` won't work.
+A website that looks and feels like playing an old DVD on a CRT.
 
 ```sh
-npx http-server -p 8000
+pnpm install
+pnpm dev
 ```
 
-Then open http://localhost:8000/tv.html
-
-`tv-webgl.html` is an experimental WebGL2 version with a simulated electron beam (Gaussian scanlines whose width grows with brightness). It has no scanline/resolution toggles.
-
-The server must support HTTP range requests, otherwise the timeline slider can't seek. `python3 -m http.server` and `php -S` don't.
-
-Videos are loaded from `files/` (see `FILES` in `tv.html`).
+- `src/lib/tv.js`: the TV effect (composite signal, beam, phosphor mask, transitions)
+- `src/routes/+page.svelte`: main page
+- Videos: served from the R2 bucket at `tv-website-assets.roccopunghellini.com`, which needs a CORS policy allowing the site's origin
+- `static/files/`: local copy of the videos, used if R2 fails (not in git)
+- `prototypes/`: the original standalone experiments, see `prototypes/README.md`
 
 ## Controls
 
-- **Click / any key**: unmute
+- **First click / key**: unmute (a first click only unmutes, it doesn't pause)
+- **H**: show / hide the video dropdown and timeline (hidden by default)
+- **M**: mute / unmute
+- **P / click**: play / pause
+- **F**: freeze the current field briefly
 - **Space**: next video with a random transition
-- **Click on screen**: freeze the current field briefly
-- **Dropdown** (bottom left): pick a video
-- **Slider** (bottom): move through the current video
-- **M**: mute / unmute (WebGL version)
-- **← / →**: jump 5 s back / forward (WebGL version)
-- **Enter**: play / pause (WebGL version)
-- **Low res** checkbox: toggle the forced CRT resolution vs native screen resolution
+- **← / →**: jump 5 s back / forward

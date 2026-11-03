@@ -108,7 +108,7 @@
   // playback
 
   let cur = 0, idx = 0;
-  const load = (v, i) => { v.src = 'files/' + FILES[i]; v.play(); };
+  const load = (v, i) => { v.src = '../static/files/' + FILES[i]; v.play(); };
 
   pick.innerHTML = FILES.map(f => `<option>${f}</option>`).join('');
   pick.onchange = () => load(vids[cur], idx = pick.selectedIndex);

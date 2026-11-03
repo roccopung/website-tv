@@ -38,7 +38,7 @@
   for (const [pick, video, start] of [[pickA, a, 0], [pickB, b, 1]]) {
     pick.innerHTML = files.map(f => `<option>${f}</option>`).join('');
     pick.selectedIndex = start;
-    pick.onchange = () => video.src = 'files/' + pick.value;
+    pick.onchange = () => video.src = '../static/files/' + pick.value;
     pick.onchange();
   }
 
